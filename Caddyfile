@@ -1,7 +1,6 @@
 # Public: Incentives user dashboard
-# When using a domain, replace :80 with your domain (e.g. incentives.yourdomain.com)
-# Caddy will auto-provision SSL when you use a domain name
-:80 {
+# Caddy auto-provisions SSL via Let's Encrypt
+incentives.duckdns.org {
 	reverse_proxy incentives:3000
 }
 
