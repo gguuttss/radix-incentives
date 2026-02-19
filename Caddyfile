@@ -1,0 +1,11 @@
+# Public: Incentives user dashboard
+# When using a domain, replace :80 with your domain (e.g. incentives.yourdomain.com)
+# Caddy will auto-provision SSL when you use a domain name
+:80 {
+	reverse_proxy incentives:3000
+}
+
+# Admin and BullBoard are NOT routed through Caddy.
+# They are accessed directly via Tailscale:
+#   Admin:     http://<tailscale-ip>:3001
+#   BullBoard: http://<tailscale-ip>:3003/ui

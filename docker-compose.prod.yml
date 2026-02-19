@@ -1,0 +1,180 @@
+volumes:
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+services:
+  # ===================
+  # Infrastructure
+  # ===================
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.0-alpine
+    restart: always
+    volumes:
+      - redisdata:/data
+    command: redis-server --save 20 1 --loglevel warning --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===================
+  # Application Services
+  # ===================
+  incentives:
+    build:
+      context: .
+      dockerfile: dockerfiles/incentives.Dockerfile
+      args:
+        NEXT_PUBLIC_DAPP_DEFINITION_ADDRESS: ${DAPP_DEFINITION_ADDRESS}
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/radix-incentives
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      PORT: 3000
+      APP_URL: ${INCENTIVES_URL}
+      APPLICATION_NAME: incentives
+      WORKERS_API_BASE_URL: http://workers:3003
+      DAPP_DEFINITION_ADDRESS: ${DAPP_DEFINITION_ADDRESS}
+      TOKEN_PRICE_SERVICE_API_KEY: ${TOKEN_PRICE_SERVICE_API_KEY}
+      MAX_USER_PER_IP: 4
+
+  admin:
+    build:
+      context: .
+      dockerfile: dockerfiles/admin.Dockerfile
+    restart: always
+    # Exposed on port 3001 — only accessible via Tailscale (blocked by UFW)
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/radix-incentives
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      PORT: 3000
+      PUBLIC_INCENTIVES_API_URL: ${INCENTIVES_URL}
+      PUBLIC_LOG_LEVEL: debug
+      WORKERS_API_BASE_URL: http://workers:3003
+      STREAMER_API_BASE_URL: http://streamer:3004
+      JWT_SECRET: ${JWT_SECRET}
+      TOKEN_PRICE_SERVICE_API_KEY: ${TOKEN_PRICE_SERVICE_API_KEY}
+
+  workers:
+    build:
+      context: .
+      dockerfile: dockerfiles/workers.Dockerfile
+    restart: always
+    # Exposed on port 3003 — BullBoard UI at /ui, only accessible via Tailscale
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/radix-incentives
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      PORT: 3003
+      LOG_LEVEL: debug
+      EVENT_WORKER_CONCURRENCY: 20
+      TRANSACTION_WORKER_CONCURRENCY: 20
+      GATEWAY_URL: https://mainnet.radixdlt.com
+      TOKEN_PRICE_SERVICE_URL: https://token-price-service.radixdlt.com/price/historicalPrice
+      TOKEN_PRICE_SERVICE_API_KEY: ${TOKEN_PRICE_SERVICE_API_KEY}
+      NODE_MAX_OLD_SPACE_SIZE: 3072
+      SNAPSHOT_BATCH_SIZE: 1000
+      APPLICATION_NAME: incentives-worker
+
+  streamer:
+    build:
+      context: .
+      dockerfile: dockerfiles/streamer.Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      workers:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/radix-incentives
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      PUBLIC_NETWORK_ID: 2
+      WORKERS_API_BASE_URL: http://workers:3003
+      GATEWAY_URL: https://mainnet.radixdlt.com
+      TOKEN_PRICE_SERVICE_URL: https://token-price-service.radixdlt.com/price/historicalPrice
+      TOKEN_PRICE_SERVICE_API_KEY: ${TOKEN_PRICE_SERVICE_API_KEY}
+      APPLICATION_NAME: incentives-streamer
+
+  # ===================
+  # One-off: Database Migrations
+  # Run with: docker compose -f docker-compose.prod.yml --env-file .env.prod run --rm migrate
+  # ===================
+  migrate:
+    build:
+      context: .
+      dockerfile: dockerfiles/workers.Dockerfile
+    profiles: ["migration"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/radix-incentives
+    working_dir: /app/packages/db
+    entrypoint: ["npx", "drizzle-kit", "migrate", "--config=./src/incentives/drizzle.config.ts"]
+
+  # ===================
+  # Reverse Proxy (public traffic only)
+  # ===================
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - incentives
