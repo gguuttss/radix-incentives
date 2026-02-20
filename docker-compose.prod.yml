@@ -15,6 +15,9 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: always
+    # Exposed on port 5432 — only accessible via Tailscale (blocked by UFW)
+    ports:
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d
